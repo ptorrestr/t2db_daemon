@@ -1,0 +1,539 @@
+#!/usr/bin/env python
+## developed by Sander Marechal, updated by Pablo Torres
+
+import argparse
+import shlex
+import subprocess
+import sys, time
+from daemon import Daemon
+import threading
+import m_socket
+import socket
+import signal
+from threading import Lock
+import pipes
+import os
+
+class process(object):
+    def __init__(self, 
+            python_app = None,
+            python_app_path = None,
+            consumer = None,
+            consumer_sec = None,
+            access = None,
+            access_sec = None,
+            query = None,
+            process_id = None ):
+        self._python_app = python_app
+        self._python_app_path = python_app_path
+        self._db = None
+        self._consumer = consumer
+        self._consumer_sec = consumer_sec
+        self._access = access
+        self._access_sec = access_sec
+        self._query = query
+        self._pid = int(process_id)
+        self._stdout = None
+        self._stderr = None
+
+    def input_arg(self):
+        self._db = self.get_db()
+        arg_str = (self._python_app_path + "/" + self._python_app 
+            + " " + self._db
+            + " --con \"" + self._consumer + "\""
+            + " --con_sec \"" + self._consumer_sec + "\""
+            + " --acc \"" + self._access + "\""
+            + " --acc_sec \"" + self._access_sec + "\""
+            + " --query \"" + self._query + "\"")
+        return arg_str
+
+    def conf_pipes(self):
+        global config
+        self._stdout = ( "./" + config.get_output_folder() 
+                        + "/" + "job_" + str(self._pid) + "_stdout")
+        self._stderr = ( "./" + config.get_output_folder()
+                        + "/" + "job_" + str(self._pid) + "_stderr")
+
+    def get_db(self):
+        global config
+        if config.get_database() == "sqlite":
+           arg = (config.get_database() 
+                    + " --sqlite_file " + config.get_sqlite_file()
+                    + " --sqlite_table tab" + str(self._pid))
+        elif config.get_database() == "mongo":
+            arg = (config.get_database() 
+                    + " --mongo_host " + config.get_mongo_server()
+                    + " --mongo_port " + config.get_mongo_port() 
+                    + " --mongo_coll coll" + self._pid)
+        return arg
+
+    def get_db_map(self):
+        global config
+        arg = {}
+        if config.get_database() == "sqlite":
+           arg["server"] = config.get_database() 
+           arg["file"] = config.get_sqlite_file()
+           arg["table"] = "tab" + str(self._pid)
+        elif config.get_database() == "mongo":
+            arg["server"] = config.get_database() 
+            arg["host"] = config.get_mongo_server()
+            arg["port"] = config.get_mongo_port() 
+            arg["collection"] = "coll" + self._pid
+        return arg
+
+    def run(self):
+        # Prepare command arguments
+        command_line = shlex.split(self.input_arg())
+        print ("Executing :" + str(command_line))
+        # Prepare output pipes
+        self.conf_pipes() 
+        t = pipes.Template()
+        stdout_pipe = t.open(self._stdout, "w")
+        stderr_pipe = t.open(self._stderr, "w")
+        # Execute!
+        self.proc = subprocess.Popen(command_line,
+                                    stdout = stdout_pipe,
+                                    stderr = stderr_pipe)
+        
+    def wait(self):
+        print ("Waiting process")
+        self.proc.wait()
+
+    def kill(self):
+        print ("Killing process")
+        self.proc.kill()
+
+    def poll(self):
+        ret = self.proc.poll()
+        if ret == None:
+            return True
+        return False
+
+    def get_data(self):
+        args = {}
+        args["pid"] = self._pid
+        args["stdout"] = self._stdout
+        args["stderr"] = self._stderr
+        args["db"] = self.get_db_map()
+        if self.poll():
+            args["active"] = "true"
+        else:
+            args["active"] = "false"
+        return args
+        
+## Shared memory. List of process
+class processes_list(object):
+    def __init__(self):
+        self._processes = {}
+        self._id_next_process = 0
+        self._lock = Lock()
+
+    def add(self, process):
+        self._lock.acquire()
+        try:
+            self._processes[process._pid] = process
+        finally:
+            self._lock.release()
+
+    def get(self, id_process):
+        try:
+            return self._processes[id_process]
+        except:
+            raise Exception("Process " + str(id_process) + " not found")
+
+    def get_all(self):
+        val = self._processes
+        return val
+
+    def delete(self, id_process):
+        self._lock.acquire()
+        try:
+            proc = self._processes[id_process]
+            del self._processes[id_process]
+            proc.kill()
+        finally:
+            self._lock.release()
+
+    def kill_all(self):
+        id_keys = self._processes.keys()
+        for id_proc in id_keys:
+            proc = self._processes[id_proc]
+            proc.kill()
+
+#Create global variable!
+p_list = processes_list()
+
+## Job
+class job(object):
+    def __init__(self, 
+                id_,
+                command = None,
+                process_id = None,
+                consumer = None,
+                consumer_sec = None,
+                access = None,
+                access_sec = None,
+                query = None):
+        self._id = id_
+        self._command = command # could be: START, DELETE, STOP, UPDATE, PULL
+        self._process_id = process_id
+        self._consumer = consumer
+        self._consumer_sec = consumer_sec
+        self._access = access
+        self._access_sec = access_sec
+        self._query = query
+
+    def run(self):
+        global config
+        #Run comman
+        if self._command == "START":
+            # Create new process
+            proc = process(python_app = config.get_collector_app(),
+                    python_app_path = config.get_path_collector_app(),
+                    consumer = self._consumer,
+                    consumer_sec = self._consumer_sec,
+                    access = self._access,
+                    access_sec = self._access_sec,
+                    query = self._query,
+                    process_id = self._process_id)
+            # Add to process list
+            p_list.add(proc)
+            # Run process
+            proc.run()
+            # Send return
+            args = self.get_base_return()
+            args["new_process"] = proc.get_data()
+            return args
+
+        elif self._command == "DELETE":
+            #get base return
+            args = self.get_base_return()
+            # Delete process
+            print(self._process_id)
+            try:
+                p_list.delete(int(self._process_id))
+            except Exception as e:
+                print ("Could not find process")
+                print (e)
+                args["failed"] = "true"
+                args["cause"] = str(e)
+                return args
+
+            args["delete"] = "true"
+            args["pid"] = self._process_id
+            return args
+
+        elif self._command == "STOP":
+            # Stop process
+            proc = p_list.get(self._process_id)
+            proc.stop()
+            return 1
+
+        elif self._command == "UPDATE":
+            #TODO: Kill the process, create new one with the same db
+            # Update process
+            proc = p_list.get(self._process_id)
+            return 1
+
+        elif self._command == "POLL":
+            #get base return
+            args = self.get_base_return()
+            #if _process_id == None, return all process
+            if self._process_id == "None":
+                #Return all process
+                procs = p_list.get_all()
+                proc_ids = procs.keys()
+                procs_args = []
+                for proc_id in proc_ids:
+                    proc = procs[proc_id]
+                    proc_args = {}
+                    proc_args["id"] = proc._pid
+                    proc_args["data"] = proc.get_data()
+                    procs_args.append(proc_args) 
+                args["processes"] = procs_args 
+            else:
+                #Return only process_id   
+                #Check if process exists
+                try: 
+                    proc = p_list.get(int(self._process_id))
+                except Exception as e:
+                    print ("Could not find process")
+                    print (e)
+                    args["failed"] = "true"
+                    args["cause"] = str(e)
+                    return args
+                procs_args = []
+                proc_args = {}
+                proc_args["id"] = proc._pid
+                proc_args["data"] = proc.get_data()
+                procs_args.append(proc_args)
+                args["processes"] = procs_args
+            return args
+
+    def get_base_return(self):
+        args = {}
+        args["id"] = self._id
+        args["command"] = self._command
+        return args
+
+## Parser
+class parser_data(object):
+    def __init__(self, data):
+        self._data = data
+
+    def get_job(self, id_job):
+        # Get command in json format
+        #print (self._data)
+        command = self._data['_command']
+        process_id = self._data['_process_id']
+        consumer = self._data['_consumer']
+        consumer_sec = self._data['_consumer_sec']
+        access = self._data['_access']
+        access_sec = self._data['_access_sec']
+        query = self._data['_query']
+        # Create new job
+        new_job = job(id_ = id_job,
+                    command = command,
+                    process_id = process_id,
+                    consumer = consumer,
+                    consumer_sec = consumer_sec,
+                    access = access,
+                    access_sec = access_sec,
+                    query = query)
+        # send object job to thread        
+        return new_job
+
+## Shared variable
+next_id_job = 1
+id_job_lock = Lock()
+
+## Class to control threads
+class client_thread(threading.Thread):
+    def __init__(self, thread_id, clientsocket):
+        self._thread_id = thread_id
+        self._control_socket = m_socket.control_socket(clientsocket)
+
+    def run(self):
+        global id_job_lock
+        global next_id_job
+        # Get data from client
+        data = self._control_socket.recv()
+        # Obtain new job id
+        id_job_lock.acquire()
+        try:
+            id_job = next_id_job
+            next_id_job += 1
+        finally:
+            id_job_lock.release()
+        # Start job
+        par_ = parser_data(data)
+        job = par_.get_job(id_job)
+        args = job.run()
+        # Send result to client!
+        self._control_socket.send(args)
+
+#Server
+serversocket = None
+activeserver = 0
+
+## Class mydaemon. 
+class MyDaemon(Daemon):
+    def run(self):
+        global serversocket
+        global activeserver
+        try:        
+            #create an INET, STREAMing socket
+            serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            #bind the socket to a public host, and a well-known port
+            serversocket.bind((socket.gethostname(), int(config.get_socket_port())))
+            #become a server socket
+            serversocket.listen(int(config.get_max_connection()))
+        except Exception as e:
+            print("Could not established socket connection")
+            print(e)
+            sys.exit(4)
+        activeserver = 1
+        #Initialise id_thread
+        id_thread = 0
+        while True:
+            #accept connections from outside
+            print("Server online. Waiting connections in: "
+                , socket.gethostname(), ":", config.get_socket_port())
+            (clientsocket, address) = serversocket.accept()
+            #now do something with the clientsocket
+            #in this case, we'll pretend this is a threaded server
+            ct = client_thread(id_thread, clientsocket)
+            id_thread += 1
+            ct.run()
+
+class configuration(object):
+    def __init__(self):
+        self.database = ""
+        self.sqlite_file = ""
+        self.mongo_server = ""
+        self.mongo_port = ""
+        self.mongo_collection = ""
+        self.socket_port = ""
+        self.max_connection = ""
+        self.collector_app = ""
+        self.path_collector_app = ""
+        self.output_folder = ""
+
+    def read_file(self, config_file):
+        properties = {}
+        num_line = 1
+        with open(args.config, "r", -1, "utf-8") as config_file:
+            for line in config_file:
+                if not line.startswith("#") and len(line.strip()) > 0:
+                    terms = line.strip().split("=")
+                    try:
+                        properties[terms[0].strip()] = terms[1].strip()
+                    except Exception as e:
+                        raise Exception("File not well formed, line = " 
+                                    + str(num_line))
+                num_line += 1
+        return properties
+
+    def parse(self, properties):
+        #mandatories
+        try:
+            key = 'database'
+            self.database = properties[key]
+            key = 'socket_port'
+            self.socket_port = properties[key]
+            key = 'max_connection'
+            self.max_connection = properties[key]
+            key = 'collector_app'
+            self.collector_app = properties[key]
+            key = 'path_collector_app'
+            self.path_collector_app = properties[key]
+            key = 'output_folder'
+            self.output_folder = properties[key]
+        except:
+            raise Exception( key + " property missing")
+        #Optionals
+        if self.database == "sqlite":
+            try:
+                key = 'sqlite_file'
+                self.sqlite_file = properties[key]
+            except:
+                raise Exception(key + " property missing")
+        elif self.database == "mongo":
+            try:
+                key = 'mongo_server'
+                self.mongo_server = properties[key]
+                key = 'mongo_port'
+                self.mongo_port = properties[key]
+            except:
+                raise Exception(key + " property missing")
+
+    def check(self):
+        if not os.path.exists(self.output_folder):
+            raise Exception(self.output_folder + " folder does not exist")
+
+    def get_database(self):
+        return self.database
+
+    def get_sqlite_file(self):
+        return self.sqlite_file
+    
+    def get_mongo_server(self):
+        return self.mongo_server
+
+    def get_mongo_port(self):
+        return self.mongo_port
+
+    def get_socket_port(self):
+        return self.socket_port
+    
+    def get_max_connection(self):
+        return self.max_connection
+
+    def get_collector_app(self):
+        return self.collector_app
+
+    def get_path_collector_app(self):
+        return self.path_collector_app
+    
+    def get_output_folder(self):
+        return self.output_folder
+
+## this function controls SIGINT signal (Ctrl+C).
+def signal_handler(signal, frame):
+    global activerserver
+    global serversocket
+    print ("You pressed Ctrl+C!. Stoping server")
+    p_list.kill_all()
+    if activeserver == 1:
+        serversocket.close()
+    sys.exit(0)
+
+#Gobal configuration
+config = configuration()
+
+if __name__ == "__main__":
+    ## Start signal detection
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Default options
+    default_pidfile = '/tmp/t2db-d.pid'
+    default_stdin = '/dev/null'
+    default_stdout = '/tmp/t2db-d.stdout'
+    default_stderr = '/tmp/t2db-d.stdout'
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-m', 
+        help = 'Running mode: console, start, stop, restart',
+        choices = ["console", "start", "stop", "restart"],
+        type = str,
+        required=True)
+    parser.add_argument('--config',
+        help = 'Configuration file',
+        type = str,
+        required = True)
+    
+    #optionals
+    parser.add_argument('--pidfile', 
+        help='Pid file. Default = '+default_pidfile,
+        default = default_pidfile,
+        required=False)
+    parser.add_argument('--stdin',
+        help='Stdin file. Default = '+default_stdin,
+        default = default_stdin,
+        required=False)
+    parser.add_argument('--stdout',
+        help='Stdout file. Default = '+default_stdout,
+        default = default_stdout,
+        required=False)
+    parser.add_argument('--stderr', 
+        help='Stderr file. Default = '+default_stderr, 
+        default = default_stderr,
+        required=False)
+
+    args = parser.parse_args()
+    mode = args.m
+
+    #Read configuration file.
+    try:
+        properties = config.read_file(args.config)
+        config.parse(properties)
+        config.check()
+    except Exception as e:
+        print ("Configuration file failed")
+        print (e)
+        sys.exit(3)
+
+    daemon = MyDaemon(args.pidfile, args.stdin, args.stdout, args.stderr)
+    
+    if 'start' == mode:
+        daemon.start()
+    elif 'stop' == mode:
+        daemon.stop()
+    elif 'restart' == mode:
+        daemon.restart()
+    elif 'console' == mode:
+        daemon.console()
+    else:
+        print ("Unknown mode")
+        sys.exit(2)
+    sys.exit(0)
