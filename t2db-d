@@ -40,6 +40,7 @@ class process(object):
         self._db = self.get_db()
         arg_str = (self._python_app_path + "/" + self._python_app 
             + " " + self._db
+            + " --search-id " + str(self._pid)
             + " --con \"" + self._consumer + "\""
             + " --con_sec \"" + self._consumer_sec + "\""
             + " --acc \"" + self._access + "\""
@@ -49,22 +50,23 @@ class process(object):
 
     def conf_pipes(self):
         global config
-        self._stdout = ( "./" + config.get_output_folder() 
+        self._stdout = (config.get_output_folder() 
                         + "/" + "job_" + str(self._pid) + "_stdout")
-        self._stderr = ( "./" + config.get_output_folder()
+        self._stderr = (config.get_output_folder()
                         + "/" + "job_" + str(self._pid) + "_stderr")
 
     def get_db(self):
         global config
         if config.get_database() == "sqlite":
-           arg = (config.get_database() 
-                    + " --sqlite_file " + config.get_sqlite_file()
-                    + " --sqlite_table tab" + str(self._pid))
+            arg = (config.get_database() 
+             + " --sqlite_file " + config.get_sqlite_file()
+             + " --sqlite_tweets_table " + config.get_sqlite_tweets_table()
+             + " --sqlite_searches_table " + config.get_sqlite_searches_table())
         elif config.get_database() == "mongo":
             arg = (config.get_database() 
-                    + " --mongo_host " + config.get_mongo_server()
-                    + " --mongo_port " + config.get_mongo_port() 
-                    + " --mongo_coll coll" + self._pid)
+             + " --mongo_host " + config.get_mongo_server()
+             + " --mongo_port " + config.get_mongo_port() 
+             + " --mongo_coll coll" + self._pid)
         return arg
 
     def get_db_map(self):
@@ -370,6 +372,8 @@ class configuration(object):
     def __init__(self):
         self.database = ""
         self.sqlite_file = ""
+        self.sqlite_tweets_table = ""
+        self.sqlite_searches_table = ""
         self.mongo_server = ""
         self.mongo_port = ""
         self.mongo_collection = ""
@@ -416,6 +420,10 @@ class configuration(object):
             try:
                 key = 'sqlite_file'
                 self.sqlite_file = properties[key]
+                key = 'sqlite_tweets_table'
+                self.sqlite_tweets_table = properties[key]
+                key = 'sqlite_searches_table'
+                self.sqlite_searches_table = properties[key]
             except:
                 raise Exception(key + " property missing")
         elif self.database == "mongo":
@@ -429,7 +437,11 @@ class configuration(object):
 
     def check(self):
         if not os.path.exists(self.output_folder):
-            raise Exception(self.output_folder + " folder does not exist")
+            try:
+                os.makedirs(self.output_folder)
+            except Exception as e:
+                raise Exception("Could not create directory '" 
+                        + self.output_folder + "', cause: " + e.strerror )
 
     def get_database(self):
         return self.database
@@ -437,6 +449,12 @@ class configuration(object):
     def get_sqlite_file(self):
         return self.sqlite_file
     
+    def get_sqlite_tweets_table(self):
+        return self.sqlite_tweets_table
+
+    def get_sqlite_searches_table(self):
+        return self.sqlite_searches_table
+
     def get_mongo_server(self):
         return self.mongo_server
 
