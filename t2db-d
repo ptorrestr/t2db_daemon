@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-## developed by Sander Marechal, updated by Pablo Torres
+#!/usr/bin/env python3
 
 import argparse
 import shlex
@@ -13,6 +12,8 @@ import signal
 from threading import Lock
 import pipes
 import os
+
+#TODO: Make failure tolerant. Restart process if failed
 
 class process(object):
     def __init__(self, 
@@ -50,37 +51,20 @@ class process(object):
 
     def conf_pipes(self):
         global config
-        self._stdout = (config.get_output_folder() 
+        self._stdout = (config.output_folder 
                         + "/" + "job_" + str(self._pid) + "_stdout")
-        self._stderr = (config.get_output_folder()
+        self._stderr = (config.output_folder
                         + "/" + "job_" + str(self._pid) + "_stderr")
 
     def get_db(self):
         global config
-        if config.get_database() == "sqlite":
-            arg = (config.get_database() 
-             + " --sqlite_file " + config.get_sqlite_file()
-             + " --sqlite_tweets_table " + config.get_sqlite_tweets_table()
-             + " --sqlite_searches_table " + config.get_sqlite_searches_table())
-        elif config.get_database() == "mongo":
-            arg = (config.get_database() 
-             + " --mongo_host " + config.get_mongo_server()
-             + " --mongo_port " + config.get_mongo_port() 
-             + " --mongo_coll coll" + self._pid)
+        arg =  " --db-server " + config.urldatabase
         return arg
 
     def get_db_map(self):
         global config
         arg = {}
-        if config.get_database() == "sqlite":
-           arg["server"] = config.get_database() 
-           arg["file"] = config.get_sqlite_file()
-           arg["table"] = "tab" + str(self._pid)
-        elif config.get_database() == "mongo":
-            arg["server"] = config.get_database() 
-            arg["host"] = config.get_mongo_server()
-            arg["port"] = config.get_mongo_port() 
-            arg["collection"] = "coll" + self._pid
+        arg["server"] = config.urldatabase
         return arg
 
     def run(self):
@@ -190,8 +174,8 @@ class job(object):
         #Run comman
         if self._command == "START":
             # Create new process
-            proc = process(python_app = config.get_collector_app(),
-                    python_app_path = config.get_path_collector_app(),
+            proc = process(python_app = config.collector_app,
+                    python_app_path = config.path_collector_app,
                     consumer = self._consumer,
                     consumer_sec = self._consumer_sec,
                     access = self._access,
@@ -347,9 +331,9 @@ class MyDaemon(Daemon):
             #create an INET, STREAMing socket
             serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             #bind the socket to a public host, and a well-known port
-            serversocket.bind((socket.gethostname(), int(config.get_socket_port())))
+            serversocket.bind((socket.gethostname(), int(config.socket_port)))
             #become a server socket
-            serversocket.listen(int(config.get_max_connection()))
+            serversocket.listen(int(config.max_connection))
         except Exception as e:
             print("Could not established socket connection")
             print(e)
@@ -360,7 +344,7 @@ class MyDaemon(Daemon):
         while True:
             #accept connections from outside
             print("Server online. Waiting connections in: "
-                , socket.gethostname(), ":", config.get_socket_port())
+                , socket.gethostname(), ":", config.socket_port)
             (clientsocket, address) = serversocket.accept()
             #now do something with the clientsocket
             #in this case, we'll pretend this is a threaded server
@@ -370,13 +354,7 @@ class MyDaemon(Daemon):
 
 class configuration(object):
     def __init__(self):
-        self.database = ""
-        self.sqlite_file = ""
-        self.sqlite_tweets_table = ""
-        self.sqlite_searches_table = ""
-        self.mongo_server = ""
-        self.mongo_port = ""
-        self.mongo_collection = ""
+        self.urldatabase = ""
         self.socket_port = ""
         self.max_connection = ""
         self.collector_app = ""
@@ -401,8 +379,8 @@ class configuration(object):
     def parse(self, properties):
         #mandatories
         try:
-            key = 'database'
-            self.database = properties[key]
+            key = 'urldatabase'
+            self.urldatabase = properties[key]
             key = 'socket_port'
             self.socket_port = properties[key]
             key = 'max_connection'
@@ -415,25 +393,6 @@ class configuration(object):
             self.output_folder = properties[key]
         except:
             raise Exception( key + " property missing")
-        #Optionals
-        if self.database == "sqlite":
-            try:
-                key = 'sqlite_file'
-                self.sqlite_file = properties[key]
-                key = 'sqlite_tweets_table'
-                self.sqlite_tweets_table = properties[key]
-                key = 'sqlite_searches_table'
-                self.sqlite_searches_table = properties[key]
-            except:
-                raise Exception(key + " property missing")
-        elif self.database == "mongo":
-            try:
-                key = 'mongo_server'
-                self.mongo_server = properties[key]
-                key = 'mongo_port'
-                self.mongo_port = properties[key]
-            except:
-                raise Exception(key + " property missing")
 
     def check(self):
         if not os.path.exists(self.output_folder):
@@ -442,39 +401,6 @@ class configuration(object):
             except Exception as e:
                 raise Exception("Could not create directory '" 
                         + self.output_folder + "', cause: " + e.strerror )
-
-    def get_database(self):
-        return self.database
-
-    def get_sqlite_file(self):
-        return self.sqlite_file
-    
-    def get_sqlite_tweets_table(self):
-        return self.sqlite_tweets_table
-
-    def get_sqlite_searches_table(self):
-        return self.sqlite_searches_table
-
-    def get_mongo_server(self):
-        return self.mongo_server
-
-    def get_mongo_port(self):
-        return self.mongo_port
-
-    def get_socket_port(self):
-        return self.socket_port
-    
-    def get_max_connection(self):
-        return self.max_connection
-
-    def get_collector_app(self):
-        return self.collector_app
-
-    def get_path_collector_app(self):
-        return self.path_collector_app
-    
-    def get_output_folder(self):
-        return self.output_folder
 
 ## this function controls SIGINT signal (Ctrl+C).
 def signal_handler(signal, frame):

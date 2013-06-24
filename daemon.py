@@ -1,4 +1,4 @@
-# developed by Sander Marechal
+## developed by Sander Marechal, updated by Pablo Torres
 
 import sys, os, time, atexit
 
