@@ -24,7 +24,8 @@ class process(object):
             access = None,
             access_sec = None,
             query = None,
-            process_id = None ):
+            process_id = None,
+            kind = None ):
         self._python_app = python_app
         self._python_app_path = python_app_path
         self._db = None
@@ -34,6 +35,7 @@ class process(object):
         self._access_sec = access_sec
         self._query = query
         self._pid = int(process_id)
+        self._kind = kind
         self._stdout = None
         self._stderr = None
 
@@ -41,6 +43,7 @@ class process(object):
         self._db = self.get_db()
         arg_str = (self._python_app_path + "/" + self._python_app 
             + " " + self._db
+            + " --api " + self._kind
             + " --search-id " + str(self._pid)
             + " --con \"" + self._consumer + "\""
             + " --con_sec \"" + self._consumer_sec + "\""
@@ -52,9 +55,9 @@ class process(object):
     def conf_pipes(self):
         global config
         self._stdout = (config.output_folder 
-                        + "/" + "job_" + str(self._pid) + "_stdout")
+                + "/" + "job_" + self._kind + "_" + str(self._pid) + "_stdout")
         self._stderr = (config.output_folder
-                        + "/" + "job_" + str(self._pid) + "_stderr")
+                + "/" + "job_" + self._kind + "_" + str(self._pid) + "_stderr")
 
     def get_db(self):
         global config
@@ -97,6 +100,7 @@ class process(object):
 
     def get_data(self):
         args = {}
+        args["kind"] = self._kind
         args["pid"] = self._pid
         args["stdout"] = self._stdout
         args["stderr"] = self._stderr
@@ -159,7 +163,8 @@ class job(object):
                 consumer_sec = None,
                 access = None,
                 access_sec = None,
-                query = None):
+                query = None,
+                kind = None):
         self._id = id_
         self._command = command # could be: START, DELETE, STOP, UPDATE, PULL
         self._process_id = process_id
@@ -168,6 +173,7 @@ class job(object):
         self._access = access
         self._access_sec = access_sec
         self._query = query
+        self._kind = kind
 
     def run(self):
         global config
@@ -181,7 +187,8 @@ class job(object):
                     access = self._access,
                     access_sec = self._access_sec,
                     query = self._query,
-                    process_id = self._process_id)
+                    process_id = self._process_id,
+                    kind = self._kind)
             # Add to process list
             p_list.add(proc)
             # Run process
@@ -277,6 +284,7 @@ class parser_data(object):
         access = self._data['_access']
         access_sec = self._data['_access_sec']
         query = self._data['_query']
+        kind = self._data['_kind']
         # Create new job
         new_job = job(id_ = id_job,
                     command = command,
@@ -285,7 +293,8 @@ class parser_data(object):
                     consumer_sec = consumer_sec,
                     access = access,
                     access_sec = access_sec,
-                    query = query)
+                    query = query,
+                    kind = kind)
         # send object job to thread        
         return new_job
 
